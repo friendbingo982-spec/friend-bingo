@@ -97,7 +97,7 @@ def send_telegram_notify(chat_id, text):
         urllib.request.urlopen(req, timeout=10)
     except Exception as e:
         print(f"[send_telegram_notify] error sending to {chat_id}: {e}")
-BOT_USERNAME = "friendbingolasttestbot"
+BOT_USERNAME = "Guadega_BingoBot"
 def _env_admin_ids():
     raw = os.environ.get("ADMIN_IDS", "7627811244,1119881250,2073850894")
     ids = [int(p.strip()) for p in raw.split(",") if p.strip().isdigit()]
