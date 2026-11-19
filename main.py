@@ -368,7 +368,35 @@ def verify_telebirr_sms(sms_text: str, expected_amount: int) -> dict:
         'date': '',
         'time': '',
     }
+# --------------------------
+# WITHDRAWAL OPEN/CLOSE SWITCH (controlled from admin panel)
+# --------------------------
+WITHDRAW_CLOSED_MSG = (
+    "⏰ Dear customer, withdrawals are only available from 1:00 in the morning until 6:00 at night (Ethiopian local time).\n\n"
+    "Please try again during these hours.\n\n"
+    "Questions? Contact support: @Guadega_Bingo_Support\n\n"
+    "⏰ ውድ ደንበኛችን፣ ገንዘብ ማውጣት የሚቻለው ከጠዋቱ 1:00 እስከ ምሽቱ 6:00 (በኢትዮጵያ የሰዓት አቆጣጠር) ብቻ ነው።\n\n"
+    "እባክዎ በእነዚህ ሰዓታት ውስጥ ይሞክሩ።\n\n"
+    "ለጥያቄ እና ለድጋፍ፦ @Guadega_Bingo_Support"
+)
 
+def is_withdraw_open() -> bool:
+    """Saved in MongoDB so it survives restarts. Default = open."""
+    try:
+        from db import db as mongo_db
+        doc = mongo_db["settings"].find_one({"_id": "withdraw_status"})
+        return bool(doc.get("open", True)) if doc else True
+    except Exception as e:
+        print(f"[withdraw_status] read error: {e}")
+        return True
+
+def set_withdraw_open(value: bool):
+    from db import db as mongo_db
+    mongo_db["settings"].update_one(
+        {"_id": "withdraw_status"},
+        {"$set": {"open": bool(value)}},
+        upsert=True
+    )
 # --------------------------
 # STATE & COUNTERS
 # --------------------------
@@ -648,7 +676,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
     if text in ["💳 Deposit / ያስገቡ", "💳 Deposit"]:
         user_state[user_id] = "deposit_amount"; await update.message.reply_text(t('deposit_prompt', lang)); return
 
-    if text in ["🐝 Withdraw / ያውጡ", "🐝 Withdraw"]:
+        if text in ["🐝 Withdraw / ያውጡ", "🐝 Withdraw"]:
+        if not is_withdraw_open():
+            await update.message.reply_text(WITHDRAW_CLOSED_MSG)
+            return
         if is_user_frozen(user_id):
             await update.message.reply_text("❄️ Your account is frozen. Withdrawals are currently disabled. Contact support: @Guadega_Bingo_Support")
             return
@@ -680,11 +711,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, custom
         pay_msg = f"💳 Payment Instructions\n\nSend *{amount} Birr* to:\n\n🏦 Method: Telebirr\n📱 Phone:\n`0998480054`\n\nℹ️ After sending the money, copy the entire confirmation SMS from Telebirr and paste it here 👇"
         await update.message.reply_text(pay_msg, parse_mode="Markdown"); return
 
-    if user_state.get(user_id) == "withdraw_method":
+        if user_state.get(user_id) == "withdraw_method":
         if text == "🔙 Back":
             await update.message.reply_text("👇 Main Menu", reply_markup=get_inline_menu(lang)); await update.message.reply_text("⬇️ Menu:", reply_markup=get_main_menu(lang))
             user_state.pop(user_id, None); user_state.pop(f"{user_id}_withdraw_amount", None); return
         if text != "Telebirr": await update.message.reply_text("❌ Please choose Telebirr"); return
+        if not is_withdraw_open():
+            user_state.pop(user_id, None); user_state.pop(f"{user_id}_withdraw_amount", None)
+            await update.message.reply_text(WITHDRAW_CLOSED_MSG, reply_markup=get_main_menu(lang))
+            return
         amount = user_state.get(f"{user_id}_withdraw_amount", 0); user = get_user(user_id); user_phone = user[1] if user else "N/A"
         user_state.pop(user_id, None); user_state.pop(f"{user_id}_withdraw_amount", None)
         await update.message.reply_text("⏳ Withdraw request sent to admin", reply_markup=get_main_menu(lang))
@@ -818,8 +853,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("🎮 Tap the button below to open the Bingo Game:" if lang == 'en' else "🎮 የቢንጎ ጨዋታውን ለመክፈት ከታች ያለውን ቁልፍ ይጫኑ:", reply_markup=keyboard)
     elif data == "menu_balance": await query.message.reply_text(t('balance_msg', lang, main=get_main_balance(user_id), play=get_play_balance(user_id)))
     elif data == "menu_deposit": user_state[user_id] = "deposit_amount"; await query.message.reply_text(t('deposit_prompt', lang))
-    elif data == "menu_withdraw":
-        if is_user_frozen(user_id):
+        elif data == "menu_withdraw":
+        if not is_withdraw_open():
+            await query.message.reply_text(WITHDRAW_CLOSED_MSG)
+        elif is_user_frozen(user_id):
             await query.message.reply_text("❄️ Your account is frozen. Withdrawals are currently disabled. Contact support: @Guadega_Bingo_Support")
         elif get_total_deposits(user_id) < 50: await query.message.reply_text(t('withdraw_locked', lang))
         else: user_state[user_id] = "withdraw_amount"; await query.message.reply_text(t('withdraw_prompt', lang, play_bal=get_play_balance(user_id), main_bal=get_main_balance(user_id)))
@@ -1472,6 +1509,22 @@ def api_admin_reports():
     if request.method == 'OPTIONS': return jsonify({'success': True}), 200
     try: return jsonify({'success': True, 'rows': db.get_admin_reports(request.args.get('period', 'daily'))})
     except Exception as e: return jsonify({'success': False, 'error': str(e)}), 500
+
+@flask_app.route('/api/admin/withdraw_status', methods=['GET', 'OPTIONS'])
+@require_admin
+def api_withdraw_status():
+    if request.method == 'OPTIONS': return jsonify({'success': True}), 200
+    return jsonify({'success': True, 'open': is_withdraw_open()})
+
+@flask_app.route('/api/admin/set_withdraw_status', methods=['POST', 'OPTIONS'])
+@require_admin
+def api_set_withdraw_status():
+    if request.method == 'OPTIONS': return jsonify({'success': True}), 200
+    if request.admin_user.get('role') not in ('super', 'finance'):
+        return jsonify({'success': False, 'error': 'forbidden'}), 403
+    data = request.json or {}
+    set_withdraw_open(bool(data.get('open', True)))
+    return jsonify({'success': True, 'open': is_withdraw_open()})
 
 @flask_app.route('/api/admin/settings', methods=['POST', 'OPTIONS'])
 @require_admin
